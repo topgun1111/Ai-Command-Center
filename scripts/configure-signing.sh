@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # One-time signing setup for an existing repository with no published releases.
 set -euo pipefail
-for cmd in gh keytool openssl base64; do
+for cmd in gh openssl base64; do
   command -v "$cmd" >/dev/null || { echo "Required: $cmd" >&2; exit 1; }
 done
 gh auth status
@@ -17,16 +17,31 @@ PASSFILE="$KEY_DIR/password"
 umask 077
 mkdir -p "$KEY_DIR"
 chmod 700 "$KEY_DIR"
-if [[ ! -e "$KEY" && ! -e "$PASSFILE" ]]; then
+if [[ ! -e "$KEY" ]]; then
   if grep -Eq '^ANDROID_(KEYSTORE_BASE64|KEYSTORE_PASSWORD|KEY_ALIAS|KEY_PASSWORD)$' <<< "$SECRETS"; then
     echo 'Signing secrets already exist but the local backup is missing. Restore the original key; refusing to replace it.' >&2
     exit 1
   fi
-  openssl rand -hex 32 > "$PASSFILE"
-  keytool -genkeypair -storetype PKCS12 -keystore "$KEY" -storepass:file "$PASSFILE" -keypass:file "$PASSFILE" -alias distribution -keyalg RSA -keysize 3072 -validity 10000 -dname 'CN=AI Command Center'
+  # A failed earlier keytool attempt may have left only the password.
+  # Reuse it only when no signing secrets or releases exist.
+  if [[ ! -e "$PASSFILE" ]]; then openssl rand -hex 32 > "$PASSFILE"; fi
+  [[ -s "$PASSFILE" ]] || { echo 'Empty password file; restore or securely move the incomplete backup.' >&2; exit 1; }
+  TMP=$(mktemp -d "$KEY_DIR/.generate.XXXXXXXX")
+  trap 'rm -rf "$TMP"' EXIT
+  openssl req -new -x509 -newkey rsa:3072 -sha256 -days 10000 \
+    -subj '/CN=AI Command Center' -keyout "$TMP/key.pem" -out "$TMP/cert.pem" \
+    -passout "file:$PASSFILE"
+  openssl pkcs12 -export -inkey "$TMP/key.pem" -in "$TMP/cert.pem" \
+    -name distribution -out "$TMP/distribution.p12" \
+    -passin fd:3 -passout fd:4 3<"$PASSFILE" 4<"$PASSFILE"
+  openssl pkcs12 -in "$TMP/distribution.p12" -passin "file:$PASSFILE" -noout
+  # Do not overwrite a key if another setup process created one concurrently.
+  ln "$TMP/distribution.p12" "$KEY"
+  rm -rf "$TMP"
+  trap - EXIT
 fi
 [[ -s "$KEY" && -s "$PASSFILE" ]] || { echo 'Incomplete key backup; restore original files.' >&2; exit 1; }
-keytool -list -storetype PKCS12 -keystore "$KEY" -storepass:file "$PASSFILE" -alias distribution >/dev/null
+openssl pkcs12 -in "$KEY" -passin "file:$PASSFILE" -noout
 printf 'Configure permanent signing secrets in %s using %s? [y/N] ' "$REPO" "$KEY_DIR"
 read -r answer
 [[ "$answer" == y || "$answer" == Y ]] || exit 1
