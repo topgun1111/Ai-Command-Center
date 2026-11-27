@@ -8,15 +8,25 @@ gh auth status
 REPO="${1:-topgun1111/Ai-Command-Center}"
 [[ "$REPO" =~ ^[A-Za-z0-9-]+/[A-Za-z0-9_.-]+$ ]] || { echo 'Use owner/repository' >&2; exit 1; }
 gh repo view "$REPO" --json nameWithOwner --jq .nameWithOwner
-RELEASES=$(gh api --paginate "repos/$REPO/releases?per_page=100" --jq '.[].tag_name')
-[[ -z "$RELEASES" ]] || { echo 'A release already exists. Restore its original signing key manually; do not bootstrap a new key.' >&2; exit 1; }
-SECRETS=$(gh secret list -R "$REPO" --json name --jq '.[].name')
 KEY_DIR="${AI_COMMAND_KEY_DIR:-$HOME/.ai-command-center-signing}"
 KEY="$KEY_DIR/distribution.p12"
 PASSFILE="$KEY_DIR/password"
 umask 077
 mkdir -p "$KEY_DIR"
 chmod 700 "$KEY_DIR"
+LOCK="$KEY_DIR/.setup-lock"
+mkdir "$LOCK" || { echo 'Another signing setup is active, or a stale lock remains. Check before removing it.' >&2; exit 1; }
+TMP=""
+cleanup() {
+  if [[ -n "$TMP" ]]; then rm -rf "$TMP"; fi
+  rmdir "$LOCK"
+}
+trap cleanup EXIT
+trap 'exit 130' INT
+trap 'exit 143' TERM
+RELEASES=$(gh api --paginate "repos/$REPO/releases?per_page=100" --jq '.[].tag_name')
+[[ -z "$RELEASES" ]] || { echo 'A release already exists. Restore its original signing key manually; do not bootstrap a new key.' >&2; exit 1; }
+SECRETS=$(gh secret list -R "$REPO" --json name --jq '.[].name')
 if [[ ! -e "$KEY" ]]; then
   if grep -Eq '^ANDROID_(KEYSTORE_BASE64|KEYSTORE_PASSWORD|KEY_ALIAS|KEY_PASSWORD)$' <<< "$SECRETS"; then
     echo 'Signing secrets already exist but the local backup is missing. Restore the original key; refusing to replace it.' >&2
@@ -27,7 +37,6 @@ if [[ ! -e "$KEY" ]]; then
   if [[ ! -e "$PASSFILE" ]]; then openssl rand -hex 32 > "$PASSFILE"; fi
   [[ -s "$PASSFILE" ]] || { echo 'Empty password file; restore or securely move the incomplete backup.' >&2; exit 1; }
   TMP=$(mktemp -d "$KEY_DIR/.generate.XXXXXXXX")
-  trap 'rm -rf "$TMP"' EXIT
   openssl req -new -x509 -newkey rsa:3072 -sha256 -days 10000 \
     -subj '/CN=AI Command Center' -keyout "$TMP/key.pem" -out "$TMP/cert.pem" \
     -passout "file:$PASSFILE"
@@ -35,10 +44,11 @@ if [[ ! -e "$KEY" ]]; then
     -name distribution -out "$TMP/distribution.p12" \
     -passin fd:3 -passout fd:4 3<"$PASSFILE" 4<"$PASSFILE"
   openssl pkcs12 -in "$TMP/distribution.p12" -passin "file:$PASSFILE" -noout
-  # Do not overwrite a key if another setup process created one concurrently.
-  ln "$TMP/distribution.p12" "$KEY"
+  # The directory lock serializes setup; Android may forbid hard links.
+  [[ ! -e "$KEY" && ! -L "$KEY" ]] || { echo 'Signing key already exists; refusing to overwrite it.' >&2; exit 1; }
+  mv "$TMP/distribution.p12" "$KEY"
   rm -rf "$TMP"
-  trap - EXIT
+  TMP=""
 fi
 [[ -s "$KEY" && -s "$PASSFILE" ]] || { echo 'Incomplete key backup; restore original files.' >&2; exit 1; }
 openssl pkcs12 -in "$KEY" -passin "file:$PASSFILE" -noout
@@ -46,8 +56,8 @@ printf 'Configure permanent signing secrets in %s using %s? [y/N] ' "$REPO" "$KE
 read -r answer
 [[ "$answer" == y || "$answer" == Y ]] || exit 1
 base64 < "$KEY" | tr -d '\r\n' | gh secret set ANDROID_KEYSTORE_BASE64 -R "$REPO"
-gh secret set ANDROID_KEYSTORE_PASSWORD -R "$REPO" < "$PASSFILE"
-gh secret set ANDROID_KEY_PASSWORD -R "$REPO" < "$PASSFILE"
+printf '%s' "$(cat "$PASSFILE")" | gh secret set ANDROID_KEYSTORE_PASSWORD -R "$REPO"
+printf '%s' "$(cat "$PASSFILE")" | gh secret set ANDROID_KEY_PASSWORD -R "$REPO"
 printf '%s' distribution | gh secret set ANDROID_KEY_ALIAS -R "$REPO"
 echo "Keep an encrypted backup of $KEY_DIR; never commit or share these files."
 gh workflow run android.yml -R "$REPO" --ref main
