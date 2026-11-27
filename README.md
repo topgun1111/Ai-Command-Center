@@ -35,7 +35,14 @@ gh auth login
 bash scripts/create-repo.sh
 ```
 
-The script asks before creating a public `ai-command-center` repository under your authenticated account (or pass `owner/repository` as its argument). It creates a permanent PKCS12 signing key outside the repository, configures repository secrets before pushing, and pushes the source to `main`. Keep encrypted backups of the key and password in `~/.ai-command-center-signing`. Never commit them. If setup fails midway, inspect the existing repo and secrets before resuming manually; the script refuses to overwrite an existing repository. Git must have your commit identity configured, and the CLI account must have permission to create public repositories and set Actions secrets. Public releases are necessary for token-free updates. The repository has not been created by this archive.
+The script asks before creating a public `ai-command-center` repository under your authenticated account (or pass `owner/repository` as its argument). It creates a permanent PKCS12 signing key outside the repository, configures repository secrets before pushing, and pushes the source to `main`. Keep encrypted backups of the key and password in `~/.ai-command-center-signing`. Never commit them. If setup fails midway, inspect the existing repo and secrets before resuming manually; the script refuses to overwrite an existing repository. Git must have your commit identity configured, and the CLI account must have permission to create public repositories and set Actions secrets. Public releases are necessary for token-free updates. For an already-created repository with no published releases, use the one-time recovery script instead:
+
+```sh
+gh auth login
+bash scripts/configure-signing.sh topgun1111/Ai-Command-Center
+```
+
+It validates the repository and release history, creates or reuses a local permanent signing key, uploads the four Actions secrets, and starts the release workflow. It refuses to bootstrap after any release exists or replace existing signing secrets without a local key backup. Keep the backup private and encrypted. Run on your own authenticated computer, not in an untrusted CI environment.
 
 CI builds and lints a signed release APK on `main` pushes or manual runs; it publishes only GitHub Releases, no Actions artifact uploads. The version code is `1000 + GITHUB_RUN_NUMBER`; the displayed version is `1.3.<versionCode>-<7-character commit SHA>`. Do not reset the workflow run numbering or lower the version code if migrating repositories. Reruns do not overwrite already published APKs or replace a newer release. A missing signing secret fails the build instead of publishing an incompatible APK. The release keystore is configured through `ANDROID_KEYSTORE_BASE64`, `ANDROID_KEYSTORE_PASSWORD`, `ANDROID_KEY_ALIAS`, and `ANDROID_KEY_PASSWORD`. If you already installed an APK signed with another key, export profiles first; Android will not allow a differently signed update. The first official signed release establishes the upgrade chain.
 

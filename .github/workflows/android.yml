@@ -35,10 +35,21 @@ jobs:
       - name: Restore permanent signing key (required)
         env:
           KEYSTORE_BASE64: ${{ secrets.ANDROID_KEYSTORE_BASE64 }}
+          ANDROID_KEYSTORE_PASSWORD: ${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
+          ANDROID_KEY_ALIAS: ${{ secrets.ANDROID_KEY_ALIAS }}
+          ANDROID_KEY_PASSWORD: ${{ secrets.ANDROID_KEY_PASSWORD }}
         run: |
-          test -n "$KEYSTORE_BASE64" || { echo 'Permanent signing key not configured'; exit 1; }
+          set -eu
+          if [[ -z "$KEYSTORE_BASE64" || -z "$ANDROID_KEYSTORE_PASSWORD" || -z "$ANDROID_KEY_ALIAS" || -z "$ANDROID_KEY_PASSWORD" ]]; then
+            echo '::warning::Signing secrets missing; checking source without publishing an APK.'
+            gradle --no-daemon :app:assembleDebug :app:lintDebug
+            echo '::error::Configure permanent signing with scripts/configure-signing.sh on an authenticated computer; no unsigned or temporary-key release will be published.'
+            exit 1
+          fi
           umask 077
           printf '%s' "$KEYSTORE_BASE64" | base64 --decode > "$RUNNER_TEMP/distribution.p12"
+          test -s "$RUNNER_TEMP/distribution.p12"
+          keytool -list -storetype PKCS12 -keystore "$RUNNER_TEMP/distribution.p12" -storepass:env ANDROID_KEYSTORE_PASSWORD -alias "$ANDROID_KEY_ALIAS" >/dev/null
           echo "ANDROID_KEYSTORE_PATH=$RUNNER_TEMP/distribution.p12" >> "$GITHUB_ENV"
       - name: Build signed release and lint
         env:
@@ -66,6 +77,16 @@ jobs:
           if [ -n "$LATEST" ] && [ "$LATEST" -ge "$APP_VERSION_CODE" ]; then
             echo 'A newer or equal version already exists; skipping publication.'
             exit 0
+          fi
+          # Preserve the signing identity of every already-published official release.
+          if [[ -n "$LATEST" ]]; then
+            PREVIOUS_TAG=$(gh release list --limit 100 --json tagName --jq '.[].tagName' | grep -E "^v1\\.[0-9]+\\.$LATEST-[0-9a-f]{7}$")
+            mkdir -p "$RUNNER_TEMP/previous-release"
+            gh release download "$PREVIOUS_TAG" --pattern "AICommandCenter-$PREVIOUS_TAG.apk" --dir "$RUNNER_TEMP/previous-release"
+            cert() { "$ANDROID_HOME/build-tools/35.0.0/apksigner" verify --print-certs "$1" | sed -n 's/^Signer #1 certificate SHA-256 digest: //p'; }
+            OLD_CERT=$(cert "$RUNNER_TEMP/previous-release/AICommandCenter-$PREVIOUS_TAG.apk")
+            NEW_CERT=$(cert "$APK")
+            [[ -n "$OLD_CERT" && "$OLD_CERT" == "$NEW_CERT" ]] || { echo "::error::Release signing certificate changed; refusing incompatible update."; exit 1; }
           fi
           # Publish direct patches from up to five preceding stable APKs.
           # Missing bases or unhelpful deltas never prevent a full APK release.
