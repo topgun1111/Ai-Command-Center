@@ -32,4 +32,4 @@ android {
     kotlinOptions { jvmTarget = "17" }
     buildTypes { release { isMinifyEnabled = false; signingConfig = signingConfigs.getByName("distribution") } }
 }
-dependencies { implementation("androidx.core:core:1.15.0") }
+dependencies { implementation("androidx.core:core:1.15.0"); testImplementation("junit:junit:4.13.2") }

@@ -1,7 +1,7 @@
 <resources>
     <string name="service_description">Shows controls only in selected apps. On your tap or explicitly enabled text shortcut, reads the focused non-password field to insert chosen instructions. No messages are sent automatically. No screen content is saved or transmitted.</string>
     <style name="AppTheme" parent="android:style/Theme.Material.NoActionBar">
-        <item name="android:fontFamily">sans</item><item name="android:colorAccent">#8EB6FF</item>
+        <item name="android:fontFamily">sans</item><item name="android:colorAccent">#8EB6FF</item><item name="android:colorControlHighlight">#445D83</item><item name="android:colorBackground">#111827</item>
         <item name="android:windowBackground">#111827</item><item name="android:statusBarColor">#111827</item><item name="android:navigationBarColor">#111827</item>
         <item name="android:windowLightStatusBar">false</item>
     </style>

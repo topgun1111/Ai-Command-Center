@@ -11,6 +11,12 @@ import android.view.View
 import android.view.WindowInsets
 import android.widget.*
 import android.graphics.Color
+import android.graphics.Typeface
+import android.graphics.drawable.GradientDrawable
+import android.content.res.ColorStateList
+import android.text.TextWatcher
+import android.text.Editable
+import android.view.Gravity
 import android.net.Uri
 import android.accessibilityservice.AccessibilityServiceInfo
 import android.view.accessibility.AccessibilityManager
@@ -28,10 +34,37 @@ class MainActivity : Activity() {
     private var composerApp = ""
     private var composerProject = ""
     private var editor: EditText? = null
+    private var repoBusy = false
+    private var repoWorker: Thread? = null
+    private val pageNames=listOf("Setup","AI apps","Projects","Commands","Composer","Updates","Integrations")
+    private val pageDescriptions=listOf(
+        "Start here. Grant accessibility access, enable integrations, and back up your profiles.",
+        "Choose the AI apps where commands can appear, and assign an active GitHub project to each.",
+        "Import public GitHub repositories or add projects manually. Project-specific commands follow your selected repository.",
+        "Create reusable instructions for every AI app, a specific app, a project, or a combination.",
+        "Write a message, append matching commands, then preview, copy, or share the complete prompt.",
+        "Check for signed app updates. Compatible partial downloads save mobile data and keep your profiles.",
+        "Choose how to insert commands while keeping Gboard: floating button, gestures, shortcuts and more."
+    )
+    private val surface=Color.rgb(29,41,59)
+    private val muted=Color.rgb(167,185,209)
+    private val accent=Color.rgb(142,182,255)
+    private fun rounded(color:Int,radius:Int=14,stroke:Int=0)=GradientDrawable().apply { setColor(color); cornerRadius=dp(radius).toFloat(); if(stroke!=0)setStroke(dp(1),stroke) }
+    private fun section(title:String,subtitle:String=""):LinearLayout=column().apply {
+        background=rounded(surface); setPadding(dp(13),dp(10),dp(13),dp(12))
+        layoutParams=LinearLayout.LayoutParams(-1,-2).apply { topMargin=dp(8); bottomMargin=dp(4) }
+        if(title.isNotEmpty())addView(text(title,18f).apply { setTypeface(typeface,Typeface.BOLD) })
+        if(subtitle.isNotEmpty())addView(text(subtitle,14f).apply { setTextColor(muted) })
+    }
+    private fun searchChanges(input:EditText,onChange:(String)->Unit) { input.addTextChangedListener(object:TextWatcher { override fun beforeTextChanged(s:CharSequence?,start:Int,count:Int,after:Int){}; override fun onTextChanged(s:CharSequence?,start:Int,before:Int,count:Int){onChange(s?.toString().orEmpty())}; override fun afterTextChanged(s:Editable?){} }) }
     private fun dp(n: Int) = (n * resources.displayMetrics.density + .5f).toInt()
     private fun column() = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
     private fun text(s: String, size: Float = 16f) = TextView(this).apply { text = s; textSize = size; setTextColor(Color.rgb(235,241,255)); setPadding(dp(4),dp(6),dp(4),dp(6)) }
-    private fun button(s: String, action: () -> Unit) = Button(this).apply { text = s; isAllCaps = false; setOnClickListener { action() } }
+    private fun button(s: String, action: () -> Unit) = Button(this).apply {
+        text = s; isAllCaps = false; textSize=14f; minHeight=dp(48); setPadding(dp(12),dp(8),dp(12),dp(8))
+        setTextColor(Color.rgb(235,241,255)); backgroundTintList=ColorStateList.valueOf(Color.rgb(44,65,94)); setOnClickListener { action() }
+    }
+    private fun primary(s:String,action:()->Unit)=button(s,action).apply { backgroundTintList=ColorStateList.valueOf(accent); setTextColor(Color.rgb(13,30,57)); setTypeface(typeface,Typeface.BOLD) }
     private fun field(hint: String, value: String = "", multi: Boolean = false) = EditText(this).apply {
         this.hint = hint; setText(value); inputType = if (multi) InputType.TYPE_CLASS_TEXT or InputType.TYPE_TEXT_FLAG_MULTI_LINE or InputType.TYPE_TEXT_FLAG_CAP_SENTENCES else InputType.TYPE_CLASS_TEXT; if (multi) { minLines = 4; gravity = android.view.Gravity.TOP } else setSingleLine(true)
     }
@@ -41,6 +74,7 @@ class MainActivity : Activity() {
         super.onCreate(savedInstanceState); store = Store(this); integrations = Integrations(this); integrationPage = savedInstanceState?.getString("integrationPage").orEmpty(); updater = Updater(applicationContext); draft = savedInstanceState?.getString("draft") ?: store.prefs.getString("draft", "").orEmpty(); page = savedInstanceState?.getInt("page") ?: 0; composerApp = savedInstanceState?.getString("composerApp").orEmpty(); composerProject = savedInstanceState?.getString("composerProject").orEmpty(); render()
     }
     override fun onSaveInstanceState(outState: Bundle) { super.onSaveInstanceState(outState); outState.putString("draft",editor?.text?.toString() ?: draft); outState.putInt("page",page); outState.putString("integrationPage",integrationPage); outState.putString("composerApp",composerApp); outState.putString("composerProject",composerProject) }
+    override fun onDestroy() { repoWorker?.interrupt(); super.onDestroy() }
     override fun onPause() { editor?.let { store.prefs.edit().putString("draft",it.text.toString()).apply() }; super.onPause() }
     override fun onResume() { super.onResume(); if ((page == 0 || page == 5) && ::root.isInitialized) render() }
     override fun onConfigurationChanged(newConfig: Configuration) { super.onConfigurationChanged(newConfig) /* Native layouts resize without destroying the editor. */ }
@@ -53,15 +87,25 @@ class MainActivity : Activity() {
             if (android.os.Build.VERSION.SDK_INT >= 30) { val bars = insets.getInsets(WindowInsets.Type.systemBars() or WindowInsets.Type.displayCutout() or WindowInsets.Type.ime()); l=bars.left; t=bars.top; r=bars.right; b=bars.bottom } else { l=insets.systemWindowInsetLeft; t=insets.systemWindowInsetTop; r=insets.systemWindowInsetRight; b=insets.systemWindowInsetBottom }
             v.setPadding(dp(12)+l,dp(8)+t,dp(12)+r,dp(8)+b); insets
         }
-        root.addView(text("AI Command Center",26f)); val nav = HorizontalScrollView(this); val row = LinearLayout(this)
-        listOf("Setup","AI apps","Projects","Commands","Composer","Updates","Integrations").forEachIndexed { i,s -> row.addView(button(if (i == page) "• $s" else s) { page=i; integrationPage=""; render() }) }; nav.addView(row); root.addView(nav)
-        val scroll = ScrollView(this).apply { isFillViewport = true }; content = column(); scroll.addView(content); root.addView(scroll,LinearLayout.LayoutParams(-1,0,1f)); setContentView(root); root.requestApplyInsets()
+        val state=store.load()
+        root.addView(text("AI Command Center",23f).apply { setTypeface(typeface,Typeface.BOLD) })
+        root.addView(text("${state.apps.size} apps  ·  ${state.projects.size} projects  ·  ${state.commands.size} commands",12f).apply { setTextColor(muted); setPadding(dp(4),0,dp(4),dp(6)) })
+        for(indices in listOf(0..3,4..6)) {
+            val row=LinearLayout(this).apply { orientation=LinearLayout.HORIZONTAL }
+            for(i in indices) {
+                val tab=TextView(this).apply { text=pageNames[i]; textSize=12f; gravity=Gravity.CENTER; minHeight=dp(44); setPadding(dp(2),dp(6),dp(2),dp(6)); setTextColor(if(i==page) Color.rgb(13,30,57) else muted); background=rounded(if(i==page) accent else surface,10); isClickable=true; isFocusable=true; isSelected=i==page; setTypeface(typeface,if(i==page) Typeface.BOLD else Typeface.NORMAL); setOnClickListener { page=i; integrationPage=""; render() } }
+                row.addView(tab,LinearLayout.LayoutParams(0,-2,1f).apply { setMargins(dp(2),dp(2),dp(2),dp(2)) })
+            }
+            root.addView(row)
+        }
+        val scroll = ScrollView(this).apply { isFillViewport = true; clipToPadding=false; setPadding(0,dp(6),0,dp(10)) }; content = column(); scroll.addView(content); root.addView(scroll,LinearLayout.LayoutParams(-1,0,1f)); setContentView(root); root.requestApplyInsets()
+        content.addView(section(pageNames[page],pageDescriptions[page]))
         when (page) { 0 -> setup(); 1 -> apps(); 2 -> projects(); 3 -> commands(); 4 -> composer(); 5 -> updates(); 6 -> integrationSettings() }
     }
     private fun setup() {
         val s=store.load(); content.addView(text(if(serviceEnabled()) "Accessibility service: enabled" else "Accessibility service: disabled",20f))
         content.addView(text("Integration controls appear only in selected foreground apps. Use a command button or an explicitly enabled shortcut to append instructions to the focused editable field. The service can access screen contents; this app does not store or transmit those contents. It never sends a message automatically."))
-        content.addView(button("Enable / manage accessibility") { AlertDialog.Builder(this).setTitle("Accessibility access").setMessage("Allow Android accessibility access to detect selected foreground apps and insert commands into the focused non-password input only after your tap or enabled shortcut. Android 13+ may also use the active editor connection without replacing your keyboard. You can disable it at any time. Network access is used only for app updates; target-app text is not sent.").setNegativeButton("Cancel",null).setPositiveButton("Continue") { _,_-> store.prefs.edit().putBoolean("consent",true).apply(); startActivity(Intent(Settings.ACTION_ACCESSIBILITY_SETTINGS)) }.show() })
+        content.addView(primary("Enable / manage accessibility") { AlertDialog.Builder(this).setTitle("Accessibility access").setMessage("Allow Android accessibility access to detect selected foreground apps and insert commands into the focused non-password input only after your tap or enabled shortcut. Android 13+ may also use the active editor connection without replacing your keyboard. You can disable it at any time. Network access is used for app updates and public repository discovery you request; target-app text is not sent.").setNegativeButton("Cancel",null).setPositiveButton("Continue") { _,_-> store.prefs.edit().putBoolean("consent",true).apply(); startActivity(Intent(Settings.ACTION_ACCESSIBILITY_SETTINGS)) }.show() })
         content.addView(Switch(this).apply { text="Master enable: AI integrations"; isChecked=s.enabled; setOnCheckedChangeListener { _,checked -> store.change { it.copy(enabled=checked) } } })
         content.addView(text("If Android blocks accessibility for a sideloaded app, open App info and look for Allow restricted settings (if available). Your phone may require additional confirmation."))
         content.addView(button("Open app info") { startActivity(Intent(Settings.ACTION_APPLICATION_DETAILS_SETTINGS,Uri.parse("package:$packageName"))) })
@@ -73,7 +117,8 @@ class MainActivity : Activity() {
         val methods=linkedMapOf("floating" to "Floating button", "edge" to "Edge swipe", "shortcuts" to "Text shortcuts", "selection" to "Text selection menu", "tile" to "Quick Settings tile", "clipboard" to "Gboard clipboard")
         if(integrationPage !in methods) {
             content.addView(text("Integration methods",22f)); content.addView(text("Keep Gboard as your keyboard. Each method is independently enabled. Select allowed AI apps and enable the master switch in Setup."))
-            methods.forEach { (key,name) -> content.addView(button("$name · ${if(integrations.enabled(key)) "On" else "Off"}") { integrationPage=key; render() }) }
+            val descriptions=mapOf("floating" to "Tap a movable button over your AI app.", "edge" to "Swipe inward from a small edge handle.", "shortcuts" to "Type a custom trigger to expand commands.", "selection" to "Use AI Commands in the text selection menu.", "tile" to "Open commands from Android Quick Settings.", "clipboard" to "Copy a command block and paste with Gboard.")
+            methods.forEach { (key,name) -> val card=section(name,descriptions.getValue(key)); card.addView(button(if(integrations.enabled(key)) "Enabled · Settings" else "Disabled · Settings") { integrationPage=key; render() }); content.addView(card) }
             return
         }
         val key=integrationPage
@@ -144,7 +189,7 @@ class MainActivity : Activity() {
         if (!updater.configured) { content.addView(text("No update repository configured in this build.")); return }
         val status = runCatching { updater.status() }.getOrElse { Updater.Status(it.message ?: "Unable to read download status") }
         content.addView(text(status.message))
-        content.addView(button(if (updateBusy) "Working…" else "Check for updates") {
+        content.addView(primary(if (updateBusy) "Working…" else "Check for updates") {
             updateTask {
                 val release = updater.check()
                 runOnUiThread {
@@ -183,11 +228,16 @@ class MainActivity : Activity() {
         content.addView(text("Select apps to allow AI Command Center integrations in. Only choose AI apps you want to control."))
         val intent=Intent(Intent.ACTION_MAIN).addCategory(Intent.CATEGORY_LAUNCHER)
         val installed=packageManager.queryIntentActivities(intent,0).map { it.activityInfo.packageName }.distinct().filter { it!=packageName }.sortedBy { label(it).lowercase() }
-        val selected=store.load().apps
-        (installed + selected).distinct().forEach { pkg -> content.addView(CheckBox(this).apply { text="${label(pkg)}\n$pkg"; isChecked=pkg in selected; setOnCheckedChangeListener { _,checked ->
-            try { store.change { it.copy(apps=if(checked) it.apps+pkg else it.apps-pkg) } } catch(e:IllegalArgumentException) { notify(e.message ?: "Profile limit reached"); render() }
-        } }) }
-        content.addView(button("Assign active GitHub project to an AI app") { selectAppProject() })
+        content.addView(primary("Assign active GitHub project") { selectAppProject() })
+        val query=field("Search installed apps"); content.addView(query)
+        val list=column(); content.addView(list)
+        fun show(filter:String) { list.removeAllViews(); val selected=store.load().apps; val packages=(installed+selected).distinct().sortedWith(compareBy<String>{it !in selected}.thenBy{label(it).lowercase()})
+            packages.filter { label(it).contains(filter,true) || it.contains(filter,true) }.forEach { pkg -> list.addView(CheckBox(this).apply { text="${label(pkg)}\n$pkg"; isChecked=pkg in selected; setOnCheckedChangeListener { _,checked ->
+                try { store.change { it.copy(apps=if(checked) it.apps+pkg else it.apps-pkg) } } catch(e:IllegalArgumentException) { notify(e.message ?: "Profile limit reached"); render() }
+            } }) }
+            if(list.childCount==0)list.addView(text("No matching apps.",14f))
+        }
+        show(""); searchChanges(query){show(it.trim())}
         content.addView(text("Unchecking an app disables its integrations but keeps all its commands and project settings."))
     }
     private fun selectAppProject() {
@@ -202,8 +252,87 @@ class MainActivity : Activity() {
         }.setNegativeButton("Cancel",null).show()
     }
     private fun projects() {
-        content.addView(text("GitHub projects use owner/repository identifiers. No GitHub token is needed; project selection determines which instructions appear.")); content.addView(button("Add GitHub project") { editProject(null) })
-        store.load().projects.forEach { p -> content.addView(button(p.repo) { editProject(p) }) }
+        val discover=section("GitHub repository discovery","Public repositories only. No login or token required. The username is saved locally.")
+        val owner=field("GitHub username",store.prefs.getString("github_owner",BuildConfig.UPDATE_REPO.substringBefore('/')).orEmpty())
+        owner.inputType=InputType.TYPE_CLASS_TEXT or InputType.TYPE_TEXT_VARIATION_VISIBLE_PASSWORD
+        discover.addView(owner)
+        discover.addView(primary(if(repoBusy) "Fetching repositories…" else "Fetch public repositories") {
+            val user=GitHubRepoRules.normalizeOwner(owner.text.toString())
+            if(user==null) { owner.error="Enter a GitHub username or profile URL"; return@primary }
+            store.prefs.edit().putString("github_owner",user).apply()
+            fetchRepositories(user)
+        }.apply { isEnabled=!repoBusy })
+        content.addView(discover)
+        content.addView(button("Add project manually") { editProject(null) })
+        val query=field("Search saved projects"); content.addView(query)
+        val list=column(); content.addView(list)
+        fun show(filter:String) {
+            list.removeAllViews()
+            val saved=store.load().projects
+            val matches=saved.filter { it.repo.contains(filter,true) }.sortedBy { it.repo.lowercase() }
+            list.addView(text("${matches.size} of ${saved.size} saved projects",13f).apply { setTextColor(muted) })
+            matches.forEach { p -> val card=section(p.repo,"${store.load().commands.count { it.project==p.id }} project commands"); card.addView(button("Edit project") { editProject(p) }); list.addView(card) }
+            if(matches.isEmpty())list.addView(text("No matching projects.",14f))
+        }
+        show(""); searchChanges(query){show(it.trim())}
+    }
+    private fun fetchRepositories(owner:String) {
+        if(repoBusy)return
+        repoBusy=true; render()
+        repoWorker=Thread {
+            val result=runCatching { GitHubPublicRepos.fetch(owner) }
+            runOnUiThread {
+                repoBusy=false; repoWorker=null
+                if(isDestroyed || isFinishing)return@runOnUiThread
+                if(page==2)render()
+                result.onSuccess { if(page==2) showRepositoryPicker(owner,it) else notify("Repository lookup finished. Open Projects and fetch again to import.") }
+                    .onFailure { notify(it.message ?: "Could not fetch public repositories") }
+            }
+        }.apply { start() }
+    }
+    private fun showRepositoryPicker(owner:String,result:GitHubPublicRepos.Result) {
+        val saved=store.load().projects.map { it.repo.lowercase(java.util.Locale.ROOT) }.toSet()
+        val candidates=result.repositories.filter { it.fullName.lowercase(java.util.Locale.ROOT) !in saved }
+        if(candidates.isEmpty()) { notify(if(result.repositories.isEmpty())"No public repositories found" else "All returned repositories are already saved"); return }
+        val selected=linkedSetOf<String>()
+        val layout=column().apply { setPadding(dp(16),dp(4),dp(16),dp(8)) }
+        val query=field("Filter by name or description")
+        val summary=text("",13f).apply { setTextColor(muted) }
+        val list=column()
+        val scroll=ScrollView(this).apply { addView(list) }
+        var visible=candidates
+        fun refreshSummary() { summary.text="${selected.size} selected · ${visible.size} shown · ${result.repositories.size-candidates.size} already saved" + if(result.truncated)" · First 1,000 repos" else "" }
+        fun show(filter:String) {
+            visible=candidates.filter { it.fullName.contains(filter,true)||it.description.contains(filter,true) }
+            list.removeAllViews()
+            visible.forEach { item -> list.addView(CheckBox(this).apply {
+                text=item.fullName + (if(item.archived)" · archived" else "") + (if(item.fork)" · fork" else "") + (if(item.description.isNotBlank())"\n"+item.description.take(140) else "")
+                isChecked=item.fullName in selected
+                setOnCheckedChangeListener { _,checked -> if(checked)selected.add(item.fullName) else selected.remove(item.fullName); refreshSummary() }
+            }) }
+            if(visible.isEmpty())list.addView(text("No repositories match this filter."))
+            refreshSummary()
+        }
+        layout.addView(text("Select repositories to create local project profiles. Existing profiles and commands are unchanged.",14f))
+        layout.addView(query); layout.addView(summary)
+        val actions=LinearLayout(this)
+        actions.addView(button("Select shown") { visible.forEach { selected.add(it.fullName) }; show(query.text.toString().trim()) },LinearLayout.LayoutParams(0,-2,1f))
+        actions.addView(button("Clear all") { selected.clear(); show(query.text.toString().trim()) },LinearLayout.LayoutParams(0,-2,1f))
+        layout.addView(actions)
+        val maxHeight=(resources.displayMetrics.heightPixels*0.38).toInt().coerceAtLeast(dp(100))
+        layout.addView(scroll,LinearLayout.LayoutParams(-1,maxHeight))
+        show(""); searchChanges(query){show(it.trim())}
+        val dialog=AlertDialog.Builder(this).setTitle("$owner · public repositories").setView(layout).setNegativeButton("Cancel",null).setPositiveButton("Import selected",null).create()
+        dialog.setOnShowListener { dialog.getButton(AlertDialog.BUTTON_POSITIVE).setOnClickListener {
+            if(selected.isEmpty()) { notify("Select at least one repository"); return@setOnClickListener }
+            try {
+                val latest=store.load()
+                val names=GitHubRepoRules.newNames(latest.projects.map { it.repo },selected.toList())
+                store.save(latest.copy(projects=latest.projects+names.map { Project(store.id(),it) }))
+                dialog.dismiss(); render(); notify("${names.size} repositories imported")
+            } catch(e:IllegalArgumentException) { notify(e.message ?: "Project storage limit reached") }
+        } }
+        dialog.show()
     }
     private fun editProject(p: Project?) {
         val input=field("owner/repository",p?.repo.orEmpty()); val d=AlertDialog.Builder(this).setTitle(if(p==null) "Add project" else "Edit project").setView(input).setNegativeButton("Cancel",null).setPositiveButton("Save",null)
@@ -212,8 +341,10 @@ class MainActivity : Activity() {
     }
     private fun scopeLabel(c: Command,s: Store.State): String = listOfNotNull(c.app.takeIf { it.isNotEmpty() }?.let { label(it) },s.projects.find { it.id==c.project }?.repo).joinToString(" / ").ifEmpty { "Universal" }
     private fun commands() {
-        val s=store.load(); content.addView(text("Universal commands apply everywhere. Choose an app, a project, or both to restrict a command. Use {{repo}} and {{repo_url}} in command bodies.")); content.addView(button("Add command") { editCommand(null) })
-        s.commands.forEach { c -> content.addView(button("${c.title} · ${scopeLabel(c,s)}") { editCommand(c) }); content.addView(text(c.body.take(180),14f)) }
+        val s=store.load(); content.addView(text("Universal commands apply everywhere. Choose an app, a project, or both to restrict a command. Use {{repo}} and {{repo_url}} in command bodies.")); content.addView(primary("Add command") { editCommand(null) })
+        val query=field("Search commands"); content.addView(query); val list=column(); content.addView(list)
+        fun show(filter:String) { list.removeAllViews(); s.commands.filter { it.title.contains(filter,true)||it.body.contains(filter,true)||scopeLabel(it,s).contains(filter,true) }.forEach { c -> val card=section(c.title,scopeLabel(c,s)); card.addView(text(c.body.take(180),14f)); card.addView(button("Edit command") { editCommand(c) }); list.addView(card) }; if(list.childCount==0) list.addView(text("No matching commands. Create a command to get started.",14f)) }
+        show(""); searchChanges(query){show(it.trim())}
     }
     private fun spinner(labels: List<String>, initial: Int): Spinner = Spinner(this).apply { adapter=ArrayAdapter(this@MainActivity,android.R.layout.simple_spinner_dropdown_item,labels); setSelection(initial.coerceIn(0,labels.lastIndex)) }
     private fun editCommand(c: Command?) {
@@ -226,7 +357,7 @@ class MainActivity : Activity() {
     private fun composer() {
         val s=store.load(); val packages=listOf("")+s.apps.sortedBy { label(it) }; val projects=listOf("")+s.projects.map { it.id }; val appSpinner=spinner(packages.map { if(it.isEmpty()) "Universal only / any app" else label(it) },packages.indexOf(composerApp).coerceAtLeast(0)); val projectSpinner=spinner(projects.map { id->s.projects.find { it.id==id }?.repo ?: "No project" },projects.indexOf(composerProject).coerceAtLeast(0)); content.addView(text("Target app")); content.addView(appSpinner); content.addView(text("GitHub project")); content.addView(projectSpinner); val input=field("Write your message",draft,true); editor=input; content.addView(input)
         fun complete(): String { composerApp=packages[appSpinner.selectedItemPosition]; composerProject=projects[projectSpinner.selectedItemPosition]; val block=CommandEngine.render(CommandEngine.matching(s.commands,composerApp,composerProject,Scope.ALL),s.projects.find { it.id==composerProject }?.repo); return CommandEngine.append(input.text.toString(),block) }
-        content.addView(button("Preview complete prompt") { AlertDialog.Builder(this).setTitle("Complete prompt").setMessage(complete()).setPositiveButton("Close",null).show() }); content.addView(button("Copy complete prompt") { copy(complete()); notify("Copied. Paste in your AI conversation.") }); content.addView(button("Share complete prompt") { startActivity(Intent.createChooser(Intent(Intent.ACTION_SEND).setType("text/plain").putExtra(Intent.EXTRA_TEXT,complete()),"Share prompt")) }); content.addView(button("Copy and open selected AI app") { val value=complete(); val launch=if(composerApp.isEmpty()) null else packageManager.getLaunchIntentForPackage(composerApp); if(launch==null) { notify("Select an installed AI app first"); return@button }; copy(value); startActivity(launch) })
+        content.addView(primary("Preview complete prompt") { AlertDialog.Builder(this).setTitle("Complete prompt").setMessage(complete()).setPositiveButton("Close",null).show() }); content.addView(button("Copy complete prompt") { copy(complete()); notify("Copied. Paste in your AI conversation.") }); content.addView(button("Share complete prompt") { startActivity(Intent.createChooser(Intent(Intent.ACTION_SEND).setType("text/plain").putExtra(Intent.EXTRA_TEXT,complete()),"Share prompt")) }); content.addView(button("Copy and open selected AI app") { val value=complete(); val launch=if(composerApp.isEmpty()) null else packageManager.getLaunchIntentForPackage(composerApp); if(launch==null) { notify("Select an installed AI app first"); return@button }; copy(value); startActivity(launch) })
         val listener=object: AdapterView.OnItemSelectedListener { override fun onNothingSelected(parent:AdapterView<*>?) {} ; override fun onItemSelected(parent:AdapterView<*>?,view:View?,position:Int,id:Long) { composerApp=packages[appSpinner.selectedItemPosition.coerceAtLeast(0)]; composerProject=projects[projectSpinner.selectedItemPosition.coerceAtLeast(0)] } }; appSpinner.onItemSelectedListener=listener; projectSpinner.onItemSelectedListener=listener
     }
     private fun copy(s: String) { (getSystemService(CLIPBOARD_SERVICE) as ClipboardManager).setPrimaryClip(ClipData.newPlainText("AI prompt",s)) }
