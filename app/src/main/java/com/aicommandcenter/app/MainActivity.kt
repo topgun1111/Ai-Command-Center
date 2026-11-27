@@ -341,7 +341,7 @@ class MainActivity : Activity() {
     }
     private fun scopeLabel(c: Command,s: Store.State): String = listOfNotNull(c.app.takeIf { it.isNotEmpty() }?.let { label(it) },s.projects.find { it.id==c.project }?.repo).joinToString(" / ").ifEmpty { "Universal" }
     private fun commands() {
-        val s=store.load(); content.addView(text("Universal commands apply everywhere. Choose an app, a project, or both to restrict a command. Use {{repo}} and {{repo_url}} in command bodies.")); content.addView(primary("Add command") { editCommand(null) })
+        val s=store.load(); content.addView(text("Universal commands apply everywhere. Choose an app, a project, or both to restrict a command. The selected repository is automatically included in every inserted command block. Optional {{repo}} and {{repo_url}} placeholders still work.")); content.addView(primary("Add command") { editCommand(null) })
         val query=field("Search commands"); content.addView(query); val list=column(); content.addView(list)
         fun show(filter:String) { list.removeAllViews(); s.commands.filter { it.title.contains(filter,true)||it.body.contains(filter,true)||scopeLabel(it,s).contains(filter,true) }.forEach { c -> val card=section(c.title,scopeLabel(c,s)); card.addView(text(c.body.take(180),14f)); card.addView(button("Edit command") { editCommand(c) }); list.addView(card) }; if(list.childCount==0) list.addView(text("No matching commands. Create a command to get started.",14f)) }
         show(""); searchChanges(query){show(it.trim())}

@@ -16,9 +16,15 @@ object CommandEngine {
             }
         }.sortedBy { if (it.project.isNotEmpty()) 2 else if (it.app.isNotEmpty()) 1 else 0 }
 
-    fun render(commands: List<Command>, repo: String?): String = commands.map { c ->
-        if (repo != null) c.body.trim().replace("{{repo}}", repo).replace("{{repo_url}}", "https://github.com/$repo") else c.body.trim()
-    }.filter { it.isNotBlank() }.distinct().joinToString("\n\n")
+    // Add the active repository once to each generated command block, including universal commands.
+    fun render(commands: List<Command>, repo: String?): String {
+        val body = commands.map { c ->
+            if (repo != null) c.body.trim().replace("{{repo}}", repo).replace("{{repo_url}}", "https://github.com/$repo") else c.body.trim()
+        }.filter { it.isNotBlank() }.distinct().joinToString("\n\n")
+        if (body.isBlank() || repo == null || !validRepo(repo)) return body
+        val header = "Target GitHub repository: $repo"
+        return if (body == header || body.startsWith("$header\n")) body else "$header\n\n$body"
+    }
 
     // Preserve the draft exactly. An identical trailing command block is not appended twice.
     fun append(draft: String, addition: String): String {

@@ -221,7 +221,7 @@ class CommandService : AccessibilityService() {
         val col=LinearLayout(this).apply { orientation=LinearLayout.VERTICAL; setPadding(dp(10),dp(8),dp(10),dp(8)); background=background(Color.rgb(17,24,39),16) }
         fun title(t:String) { col.addView(TextView(this).apply { text=t; textSize=15f; setTextColor(Color.WHITE); setPadding(dp(4),dp(6),dp(4),dp(6)) }) }
         fun button(t:String,action:()->Unit) { col.addView(Button(this).apply { text=t; isAllCaps=false; minHeight=dp(44); setOnClickListener { action() } },LinearLayout.LayoutParams(-1,-2)) }
-        title(appLabel(current)); button("Close ×") { closePanel(); sync() }; title("Project: ${repo ?: "None"}")
+        title(appLabel(current)); button("Close ×") { closePanel(); sync() }; title("Project: ${repo ?: "None"}"); if(repo!=null) title("The repository name will be included in inserted commands.")
         button("Choose GitHub project") { chooseProject() }
         val groups=listOf(Scope.UNIVERSAL to "Universal commands",Scope.APP to "App-specific commands",Scope.PROJECT to "Project commands",Scope.ALL to "Append all matching commands")
         for((scope,name) in groups) { val commands=CommandEngine.matching(s.commands,current,project,scope); if(commands.isNotEmpty()) button("$name (${commands.size})") { insert(CommandEngine.render(commands,repo)) } }
