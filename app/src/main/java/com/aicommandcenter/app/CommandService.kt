@@ -1,6 +1,12 @@
 package com.aicommandcenter.app
 
 import android.accessibilityservice.AccessibilityService
+import android.accessibilityservice.AccessibilityServiceInfo
+import android.accessibilityservice.InputMethod
+import android.os.Build
+import android.text.InputType
+import android.view.inputmethod.EditorInfo
+import androidx.annotation.RequiresApi
 import android.app.KeyguardManager
 import android.content.*
 import android.content.res.Configuration
@@ -30,6 +36,25 @@ class CommandService : AccessibilityService() {
     private var generatedHash: Int? = null
     private var generatedWindow = -1
     private val shortcutCheck = Runnable { expandShortcut() }
+    private var insertionPending = false
+    // Selection metadata only; never retain editor text or observe keystrokes here.
+    @RequiresApi(33)
+    private class EditorBridge(service: AccessibilityService) : InputMethod(service) {
+        var selectionStart = -1; private set
+        var selectionEnd = -1; private set
+        var compositionClear = false; private set
+        override fun onStartInput(attribute: EditorInfo, restarting: Boolean) {
+            selectionStart=attribute.initialSelStart; selectionEnd=attribute.initialSelEnd
+            compositionClear=false
+        }
+        override fun onUpdateSelection(oldSelStart:Int,oldSelEnd:Int,newSelStart:Int,newSelEnd:Int,candidatesStart:Int,candidatesEnd:Int) {
+            selectionStart=newSelStart; selectionEnd=newSelEnd
+            compositionClear=candidatesStart<0 && candidatesEnd<0
+        }
+        override fun onFinishInput() { selectionStart=-1; selectionEnd=-1; compositionClear=false }
+    }
+    @RequiresApi(33)
+    override fun onCreateInputMethod(): InputMethod = EditorBridge(this)
     companion object { internal var connected: CommandService? = null }
     private val handler = Handler(Looper.getMainLooper())
     private var bubble: TextView? = null
@@ -65,6 +90,10 @@ class CommandService : AccessibilityService() {
         val info=serviceInfo ?: return
         info.eventTypes=AccessibilityEvent.TYPE_WINDOW_STATE_CHANGED or AccessibilityEvent.TYPE_WINDOWS_CHANGED or AccessibilityEvent.TYPE_VIEW_FOCUSED
         if(integrations.enabled("shortcuts") && store.load().enabled && store.prefs.getBoolean("consent",false)) info.eventTypes=info.eventTypes or AccessibilityEvent.TYPE_VIEW_TEXT_CHANGED
+        if(Build.VERSION.SDK_INT>=33) {
+            val enabled=store.load().enabled && store.prefs.getBoolean("consent",false)
+            info.flags=if(enabled) info.flags or AccessibilityServiceInfo.FLAG_INPUT_METHOD_EDITOR else info.flags and AccessibilityServiceInfo.FLAG_INPUT_METHOD_EDITOR.inv()
+        }
         serviceInfo=info
     }
     override fun onAccessibilityEvent(event: AccessibilityEvent?) {
@@ -110,7 +139,7 @@ class CommandService : AccessibilityService() {
                 return
             }
         }
-        if(panel==null) {
+        if(panel==null && !insertionPending) {
             if(bubble==null && integrations.enabled("floating")) showBubble()
             if(edge==null && integrations.enabled("edge")) showEdge()
         }
@@ -199,7 +228,9 @@ class CommandService : AccessibilityService() {
     }
     private fun displayPanel(col:LinearLayout) {
         val scroll=ScrollView(this).apply { addView(col); isFillViewport=false; background=background(Color.rgb(17,24,39),16) }
-        val size=bounds(); val width=(size.width()-dp(24)).coerceAtLeast(1).coerceAtMost(dp(330)); val height=(size.height()-dp(100)).coerceAtLeast(1).coerceAtMost(dp(560)); val lp=layout(width,height).apply { y=dp(32) }
+        val size=bounds(); val width=(size.width()-dp(24)).coerceAtLeast(1).coerceAtMost(dp(330)); val maxHeight=(size.height()-dp(100)).coerceAtLeast(1).coerceAtMost(dp(560))
+        col.measure(View.MeasureSpec.makeMeasureSpec(width,View.MeasureSpec.EXACTLY),View.MeasureSpec.makeMeasureSpec(0,View.MeasureSpec.UNSPECIFIED))
+        val height=col.measuredHeight.coerceIn(1,maxHeight); val lp=layout(width,height).apply { y=dp(32) }
         try { wm.addView(scroll,lp); panel=scroll } catch(_:Exception) { panel=null; sync() }
     }
     private fun chooseProject() {
@@ -211,34 +242,101 @@ class CommandService : AccessibilityService() {
         projects.forEach { p -> button(p.repo) { if(stillActive() && current==pkg) { store.change { it.copy(active=if(p.id.isEmpty()) it.active-pkg else it.active+(pkg to p.id)) }; openPanel() } else sync() } }
         displayPanel(col)
     }
+    private fun eligible(node:AccessibilityNodeInfo,root:AccessibilityNodeInfo,pkg:String):Boolean =
+        node.packageName?.toString()==pkg && node.windowId==root.windowId && node.isFocused &&
+            node.isEditable && node.isEnabled && node.isVisibleToUser && !node.isPassword
+
+    private fun focusedEditor(root:AccessibilityNodeInfo,pkg:String):AccessibilityNodeInfo? {
+        val local=root.findFocus(AccessibilityNodeInfo.FOCUS_INPUT)
+        if(local!=null && eligible(local,root,pkg)) return local
+        val global=findFocus(AccessibilityNodeInfo.FOCUS_INPUT)
+        return global?.takeIf { eligible(it,root,pkg) }
+    }
     private fun insert(block:String) {
         if(block.isBlank()) { toast("No instructions to insert"); return }
+        if(insertionPending) return
         if(!stillActive()) { sync(); return }
         val pkg=current
+        val window=activeRoot()?.windowId ?: return
+        // Let the non-focusable overlay disappear before resolving the editor again.
+        hide(); insertionPending=true
+        handler.postDelayed({
+            insertionPending=false
+            if(!stillActive() || current!=pkg || activeRoot()?.windowId!=window) { sync(); return@postDelayed }
+            runCatching { insertFocused(block,pkg,window) }.onFailure {
+                fallback(block,"Android could not confirm the editor. Review your draft before retrying.")
+            }
+        },150)
+    }
+    private fun insertFocused(block:String,pkg:String,window:Int) {
         val root=activeRoot() ?: run { sync(); return }
-        val node=root.findFocus(AccessibilityNodeInfo.FOCUS_INPUT)
-        // Never infer a target from an unfocused field or insert into a password field.
-        if(node==null || node.packageName?.toString()!=pkg || node.windowId!=root.windowId || !node.isFocused || !node.isEditable || !node.isEnabled || !node.isVisibleToUser || node.isPassword || node.actionList.none { it.id==AccessibilityNodeInfo.ACTION_SET_TEXT }) { fallback(block); return }
-        if(!node.refresh() || !node.isFocused || node.isPassword || !stillActive()) { fallback(block); return }
-        val existing=node.text?.toString()
-        val draft=if(node.isShowingHintText) "" else existing ?: run { fallback(block); return }
+        if(root.windowId!=window || root.packageName?.toString()!=pkg) { sync(); return }
+        val node=focusedEditor(root,pkg)
+        if(node==null || !node.refresh() || !eligible(node,root,pkg) ||
+            node.actionList.none { it.id==AccessibilityNodeInfo.ACTION_SET_TEXT } ||
+            (!node.isShowingHintText && node.text==null)) {
+            if(Build.VERSION.SDK_INT>=33 && insertWithEditor(block,pkg,window)) return
+            fallback(block,"No compatible focused editor. Tap the end of your message, finish the current word, and try again.")
+            return
+        }
+        val draft=if(node.isShowingHintText) "" else node.text?.toString() ?: return
         val result=CommandEngine.append(draft,block)
-        if(result==draft) { toast("Commands already appended"); closePanel(); sync(); return }
+        if(result==draft) { toast("Commands already appended"); sync(); return }
         val max=node.maxTextLength
-        if(result.length>200000 || (max>0 && result.length>max)) { fallback(block); return }
-        if(!stillActive()) { sync(); return }
+        if(result.length>200000 || (max>0 && result.length>max)) { fallback(block,"The resulting message is too long for this editor."); return }
+        if(!stillActive() || current!=pkg || activeRoot()?.windowId!=window || !node.refresh() ||
+            !eligible(node,root,pkg) || (if(node.isShowingHintText) "" else node.text?.toString())!=draft) {
+            fallback(block,"The focused message changed. Try again."); return
+        }
         val args=Bundle().apply { putCharSequence(AccessibilityNodeInfo.ACTION_ARGUMENT_SET_TEXT_CHARSEQUENCE,result) }
         generatedHash=result.hashCode(); generatedWindow=node.windowId
         val ok=runCatching { node.performAction(AccessibilityNodeInfo.ACTION_SET_TEXT,args) }.getOrDefault(false)
-        if(!ok) { fallback(block); return }
-        val selection=Bundle().apply { putInt(AccessibilityNodeInfo.ACTION_ARGUMENT_SELECTION_START_INT,result.length); putInt(AccessibilityNodeInfo.ACTION_ARGUMENT_SELECTION_END_INT,result.length) }
-        if(stillActive() && node.refresh() && node.isFocused && !node.isPassword && node.text?.toString()==result) runCatching { node.performAction(AccessibilityNodeInfo.ACTION_SET_SELECTION,selection) }
-        closePanel(); sync(); toast("Insert requested. Review the draft before sending.")
+        if(!ok) { fallback(block,"The editor rejected direct text replacement. Review the draft before retrying or copying."); return }
+        if(stillActive() && node.refresh() && eligible(node,root,pkg) && node.text?.toString()==result) {
+            val selection=Bundle().apply { putInt(AccessibilityNodeInfo.ACTION_ARGUMENT_SELECTION_START_INT,result.length); putInt(AccessibilityNodeInfo.ACTION_ARGUMENT_SELECTION_END_INT,result.length) }
+            runCatching { node.performAction(AccessibilityNodeInfo.ACTION_SET_SELECTION,selection) }
+            toast("Commands appended. Review before sending.")
+        } else toast("Insert requested. Check your draft before sending or retrying.")
+        sync()
     }
-    private fun fallback(block:String) {
+    @RequiresApi(33)
+    private fun insertWithEditor(block:String,pkg:String,window:Int):Boolean {
+        val bridge=inputMethod as? EditorBridge ?: return false
+        val info=bridge.currentInputEditorInfo ?: return false
+        if(!bridge.currentInputStarted || info.packageName!=pkg) return false
+        val type=info.inputType
+        if((type and InputType.TYPE_MASK_CLASS)!=InputType.TYPE_CLASS_TEXT ||
+            (type and InputType.TYPE_MASK_VARIATION) !in listOf(InputType.TYPE_TEXT_VARIATION_NORMAL,InputType.TYPE_TEXT_VARIATION_LONG_MESSAGE,InputType.TYPE_TEXT_VARIATION_SHORT_MESSAGE,InputType.TYPE_TEXT_VARIATION_WEB_EDIT_TEXT) ||
+            (type and (InputType.TYPE_TEXT_FLAG_MULTI_LINE or InputType.TYPE_TEXT_FLAG_IME_MULTI_LINE))==0 ||
+            (info.imeOptions and EditorInfo.IME_FLAG_NO_PERSONALIZED_LEARNING)!=0) return false
+        val connection=bridge.currentInputConnection ?: return false
+        val surrounding=connection.getSurroundingText(200001,1,0) ?: return false
+        val draft=surrounding.text.toString()
+        // Only append at the verified end of a complete draft, never replace a selection
+        // or a composing word. Empty editors need no prior selection notification.
+        if(surrounding.offset!=0 || draft.length>200000 || surrounding.selectionStart!=draft.length ||
+            surrounding.selectionEnd!=draft.length || bridge.selectionStart!=draft.length ||
+            bridge.selectionEnd!=draft.length || (!bridge.compositionClear && draft.isNotEmpty())) return false
+        val result=CommandEngine.append(draft,block)
+        if(result==draft) { toast("Commands already appended"); sync(); return true }
+        if(result.length>200000 || !stillActive() || current!=pkg || activeRoot()?.windowId!=window ||
+            bridge.currentInputEditorInfo!==info) return false
+        val latest=connection.getSurroundingText(200001,1,0) ?: return false
+        if(latest.offset!=0 || latest.text.toString()!=draft || latest.selectionStart!=draft.length ||
+            latest.selectionEnd!=draft.length || !stillActive() || current!=pkg ||
+            activeRoot()?.windowId!=window || bridge.currentInputEditorInfo!==info ||
+            (!bridge.compositionClear && draft.isNotEmpty())) return false
+        // Only commit the suffix; never overwrite the existing draft.
+        generatedHash=result.hashCode(); generatedWindow=window
+        connection.commitText(result.substring(draft.length),1,null)
+        // The API is asynchronous/void: do not automatically repeat a possibly successful edit.
+        toast("Insert requested through Android editor. Review the draft before sending.")
+        sync(); return true
+    }
+    private fun fallback(block:String,reason:String="Direct insertion is unavailable.") {
         if(!stillActive()) { sync(); return }; closePanel()
         val col=LinearLayout(this).apply { orientation=LinearLayout.VERTICAL; setPadding(dp(10),dp(8),dp(10),dp(8)); background=background(Color.rgb(17,24,39),16) }
-        col.addView(TextView(this).apply { text="Direct insertion is unavailable. Tap the AI message field and try again, or copy just the commands and paste them manually after your draft."; setTextColor(Color.WHITE); textSize=15f })
+        col.addView(TextView(this).apply { text="$reason\n\nOr copy just the commands and paste them manually after your draft."; setTextColor(Color.WHITE); textSize=15f })
         col.addView(Button(this).apply { text="Copy commands"; isAllCaps=false; setOnClickListener { if(stillActive()) { try { (getSystemService(CLIPBOARD_SERVICE) as ClipboardManager).setPrimaryClip(ClipData.newPlainText("AI commands",block)); toast("Copy requested. Paste manually.") } catch(_:Exception) { toast("Clipboard unavailable. Use the app's composer.") }; closePanel(); sync() } else sync() } })
         col.addView(Button(this).apply { text="Back"; isAllCaps=false; setOnClickListener { openPanel() } }); displayPanel(col)
     }
