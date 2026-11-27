@@ -1,7 +1,5 @@
 # AI Command Center
 
-**Repository initialization:** Documentation only; v1.3 source and Android release workflow have not been uploaded yet. No signed APK has been built.
-
 Native Kotlin Android app for composing reusable AI instructions and inserting them into existing chats. Android 8.0+ (API 26), compile/target API 35. No AI accounts or API keys required. AndroidX Core provides secure APK sharing. Internet access is used for checking and downloading app updates only.
 
 ## Setup
